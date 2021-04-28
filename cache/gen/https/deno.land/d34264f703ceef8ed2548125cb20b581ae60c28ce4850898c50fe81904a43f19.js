@@ -1,0 +1,128 @@
+import { assert } from "./deps.ts";
+import { stripEol } from "./util.ts";
+const DEFAULT_BUF_SIZE = 4096;
+const MIN_BUF_SIZE = 16;
+const MAX_CONSECUTIVE_EMPTY_READS = 100;
+const CR = "\r".charCodeAt(0);
+const LF = "\n".charCodeAt(0);
+export class BufferFullError extends Error {
+    partial;
+    name = "BufferFullError";
+    constructor(partial) {
+        super("Buffer full");
+        this.partial = partial;
+    }
+}
+export class BufReader {
+    #buffer;
+    #reader;
+    #posRead = 0;
+    #posWrite = 0;
+    #eof = false;
+    #fill = async () => {
+        if (this.#posRead > 0) {
+            this.#buffer.copyWithin(0, this.#posRead, this.#posWrite);
+            this.#posWrite -= this.#posRead;
+            this.#posRead = 0;
+        }
+        if (this.#posWrite >= this.#buffer.byteLength) {
+            throw Error("bufio: tried to fill full buffer");
+        }
+        for (let i = MAX_CONSECUTIVE_EMPTY_READS; i > 0; i--) {
+            const rr = await this.#reader.read(this.#buffer.subarray(this.#posWrite));
+            if (rr === null) {
+                this.#eof = true;
+                return;
+            }
+            assert(rr >= 0, "negative read");
+            this.#posWrite += rr;
+            if (rr > 0) {
+                return;
+            }
+        }
+        throw new Error(`No progress after ${MAX_CONSECUTIVE_EMPTY_READS} read() calls`);
+    };
+    #reset = (buffer, reader) => {
+        this.#buffer = buffer;
+        this.#reader = reader;
+        this.#eof = false;
+    };
+    constructor(rd, size = DEFAULT_BUF_SIZE) {
+        if (size < MIN_BUF_SIZE) {
+            size = MIN_BUF_SIZE;
+        }
+        this.#reset(new Uint8Array(size), rd);
+    }
+    buffered() {
+        return this.#posWrite - this.#posRead;
+    }
+    async readLine(strip = true) {
+        let line;
+        try {
+            line = await this.readSlice(LF);
+        }
+        catch (err) {
+            let { partial } = err;
+            assert(partial instanceof Uint8Array, "Caught error from `readSlice()` without `partial` property");
+            if (!(err instanceof BufferFullError)) {
+                throw err;
+            }
+            if (!this.#eof &&
+                partial.byteLength > 0 &&
+                partial[partial.byteLength - 1] === CR) {
+                assert(this.#posRead > 0, "Tried to rewind past start of buffer");
+                this.#posRead--;
+                partial = partial.subarray(0, partial.byteLength - 1);
+            }
+            return { bytes: partial, eol: this.#eof };
+        }
+        if (line === null) {
+            return null;
+        }
+        if (line.byteLength === 0) {
+            return { bytes: line, eol: true };
+        }
+        if (strip) {
+            line = stripEol(line);
+        }
+        return { bytes: line, eol: true };
+    }
+    async readSlice(delim) {
+        let s = 0;
+        let slice;
+        while (true) {
+            let i = this.#buffer.subarray(this.#posRead + s, this.#posWrite).indexOf(delim);
+            if (i >= 0) {
+                i += s;
+                slice = this.#buffer.subarray(this.#posRead, this.#posRead + i + 1);
+                this.#posRead += i + 1;
+                break;
+            }
+            if (this.#eof) {
+                if (this.#posRead === this.#posWrite) {
+                    return null;
+                }
+                slice = this.#buffer.subarray(this.#posRead, this.#posWrite);
+                this.#posRead = this.#posWrite;
+                break;
+            }
+            if (this.buffered() >= this.#buffer.byteLength) {
+                this.#posRead = this.#posWrite;
+                const oldbuf = this.#buffer;
+                const newbuf = this.#buffer.slice(0);
+                this.#buffer = newbuf;
+                throw new BufferFullError(oldbuf);
+            }
+            s = this.#posWrite - this.#posRead;
+            try {
+                await this.#fill();
+            }
+            catch (err) {
+                err.partial = slice;
+                throw err;
+            }
+        }
+        return slice;
+    }
+}
+//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIjozLCJmaWxlIjoiYnVmX3JlYWRlci5qcyIsInNvdXJjZVJvb3QiOiIiLCJzb3VyY2VzIjpbImJ1Zl9yZWFkZXIudHMiXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6IkFBRUEsT0FBTyxFQUFFLE1BQU0sRUFBRSxNQUFNLFdBQVcsQ0FBQztBQUNuQyxPQUFPLEVBQUUsUUFBUSxFQUFFLE1BQU0sV0FBVyxDQUFDO0FBT3JDLE1BQU0sZ0JBQWdCLEdBQUcsSUFBSSxDQUFDO0FBQzlCLE1BQU0sWUFBWSxHQUFHLEVBQUUsQ0FBQztBQUN4QixNQUFNLDJCQUEyQixHQUFHLEdBQUcsQ0FBQztBQUN4QyxNQUFNLEVBQUUsR0FBRyxJQUFJLENBQUMsVUFBVSxDQUFDLENBQUMsQ0FBQyxDQUFDO0FBQzlCLE1BQU0sRUFBRSxHQUFHLElBQUksQ0FBQyxVQUFVLENBQUMsQ0FBQyxDQUFDLENBQUM7QUFFOUIsTUFBTSxPQUFPLGVBQWdCLFNBQVEsS0FBSztJQUVyQjtJQURuQixJQUFJLEdBQUcsaUJBQWlCLENBQUM7SUFDekIsWUFBbUIsT0FBbUI7UUFDcEMsS0FBSyxDQUFDLGFBQWEsQ0FBQyxDQUFDO1FBREosWUFBTyxHQUFQLE9BQU8sQ0FBWTtJQUV0QyxDQUFDO0NBQ0Y7QUFHRCxNQUFNLE9BQU8sU0FBUztJQUNwQixPQUFPLENBQWM7SUFDckIsT0FBTyxDQUFlO0lBQ3RCLFFBQVEsR0FBRyxDQUFDLENBQUM7SUFDYixTQUFTLEdBQUcsQ0FBQyxDQUFDO0lBQ2QsSUFBSSxHQUFHLEtBQUssQ0FBQztJQUdiLEtBQUssR0FBRyxLQUFLLElBQW1CLEVBQUU7UUFFaEMsSUFBSSxJQUFJLENBQUMsUUFBUSxHQUFHLENBQUMsRUFBRTtZQUNyQixJQUFJLENBQUMsT0FBTyxDQUFDLFVBQVUsQ0FBQyxDQUFDLEVBQUUsSUFBSSxDQUFDLFFBQVEsRUFBRSxJQUFJLENBQUMsU0FBUyxDQUFDLENBQUM7WUFDMUQsSUFBSSxDQUFDLFNBQVMsSUFBSSxJQUFJLENBQUMsUUFBUSxDQUFDO1lBQ2hDLElBQUksQ0FB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
